@@ -2,15 +2,29 @@
 import queue
 import re
 import sys
+import threading
 
 from google.cloud import speech
 from google.oauth2 import service_account
 
 import pyaudio
 
+try:
+    from pynput import keyboard
+except ImportError:
+    keyboard = None
+
 # Audio recording parameters
 RATE = 16000
 CHUNK = int(RATE / 10)  # 100ms
+
+# Global mute flag to control transcription without wasting API calls
+_mute_flag = threading.Event()
+_mute_flag.set()  # Start in muted state
+
+# Keyboard listener
+_listener = None
+_current_mute_callback = None
 
 
 class MicrophoneStream:
@@ -101,7 +115,7 @@ class MicrophoneStream:
             yield b"".join(data)
 
 
-def listen_print_loop(responses):
+def listen_print_loop(responses) -> str:
     """Iterates through server responses and prints them.
 
     The responses passed is a generator that will block until a response
@@ -125,6 +139,11 @@ def listen_print_loop(responses):
     num_chars_printed = 0
     transcript = ""
     for response in responses:
+        # Check mute flag - if muted, stop transcription
+        if _mute_flag.is_set():
+            print("\n[Transcription muted]")
+            break
+        
         if not response.results:
             continue
 
@@ -165,8 +184,62 @@ def listen_print_loop(responses):
     return transcript
 
 
-def main() -> None:
-    """Transcribe speech from audio file."""
+def set_mute(muted: bool) -> None:
+    """Set the mute state. When muted, stops API calls."""
+    if muted:
+        _mute_flag.set()
+        print("[Muted - no API calls]")
+    else:
+        _mute_flag.clear()
+        print("[Unmuted - listening]")
+
+
+def is_muted() -> bool:
+    """Check if transcription is muted."""
+    return _mute_flag.is_set()
+
+
+def _on_keyboard_press(key):
+    """Callback for keyboard listener. Toggle mute on 'M' press."""
+    try:
+        if hasattr(key, 'char') and key.char and key.char.lower() == 'm':
+            current_state = is_muted()
+            set_mute(not current_state)  # Toggle mute state
+    except AttributeError:
+        pass
+
+
+def start_keyboard_listener(mute_callback=None) -> None:
+    """Start listening for 'M' key press to toggle mute."""
+    global _listener, _current_mute_callback
+    
+    if keyboard is None:
+        print("Warning: pynput not installed. Keyboard listener disabled.")
+        print("Install with: pip install pynput")
+        return
+    
+    _current_mute_callback = mute_callback
+    _listener = keyboard.Listener(on_press=_on_keyboard_press)
+    _listener.start()
+    print("[Keyboard listener started - Press 'M' to toggle mute]")
+
+
+def stop_keyboard_listener() -> None:
+    """Stop the keyboard listener."""
+    global _listener
+    
+    if _listener is not None:
+        _listener.stop()
+        _listener = None
+        print("[Keyboard listener stopped]")
+
+
+def transcribe() -> str:
+    """Transcribe speech from audio. Only sends API requests when unmuted.
+    
+    Returns:
+        The transcribed text.
+    """
     # Load credentials from service account JSON file
     credentials = service_account.Credentials.from_service_account_file(
         "enhanced-kiln-484612-d1-7cdd51fdcde4.json"
@@ -197,7 +270,13 @@ def main() -> None:
         responses = client.streaming_recognize(streaming_config, requests)
 
         # Now, put the transcription responses to use.
-        listen_print_loop(responses)
+        transcript = listen_print_loop(responses)
+        return transcript
+
+
+def main() -> None:
+    """Transcribe speech from audio file."""
+    transcribe()
 
 
 if __name__ == "__main__":
